@@ -24,26 +24,26 @@ func main() {
 
 	setupWebsocket(*wsUrl)
 
-	root := js.ValueOf(map[string]interface{} {
-		"socket": js.FuncOf(func (this js.Value, args []js.Value) interface{} {
-			return asynchronously(func() interface {} {
+	root := js.ValueOf(map[string]interface{}{
+		"socket": js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+			return asynchronously(func() interface{} {
 				return int32(JsSocket(args[0].String(), args[1].String()))
 			})
 		}),
-		"connect": js.FuncOf(func (this js.Value, args []js.Value) interface{} {
-			return asynchronously(func() interface {} {
+		"connect": js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+			return asynchronously(func() interface{} {
 				JsConnect(SocketID(args[0].Int()), args[1].String())
 				return nil
 			})
 		}),
-		"close": js.FuncOf(func (this js.Value, args []js.Value) interface{} {
-			return asynchronously(func() interface {} {
+		"close": js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+			return asynchronously(func() interface{} {
 				JsClose(SocketID(args[0].Int()))
 				return nil
 			})
 		}),
-		"send": js.FuncOf(func (this js.Value, args []js.Value) interface{} {
-			return asynchronously(func() interface {} {
+		"send": js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+			return asynchronously(func() interface{} {
 				remoteAddr := ""
 				if len(args) >= 3 {
 					remoteAddr = args[2].String()
@@ -51,9 +51,9 @@ func main() {
 				return JsSend(SocketID(args[0].Int()), args[1], remoteAddr)
 			})
 		}),
-		"recv": js.FuncOf(func (this js.Value, args []js.Value) interface{} {
-			return asynchronously(func() interface {} {
-				return JsRecv(SocketID(args[0].Int()))
+		"recv": js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+			return asynchronously(func() interface{} {
+				return JsRecv(SocketID(args[0].Int()), args[1])
 			})
 		}),
 	})

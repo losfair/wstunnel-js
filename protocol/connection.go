@@ -30,9 +30,7 @@ var netReady = make(chan struct{})
 
 type SocketID int32
 
-
 type GlobalWsEndpoint struct {
-
 }
 
 func (e GlobalWsEndpoint) MTU() uint32 {
@@ -82,10 +80,14 @@ func (e GlobalWsEndpoint) Wait() {
 }
 
 type Socket struct {
-	endpoint tcpip.Endpoint
-	wq waiter.Queue
-	netProto string
+	endpoint   tcpip.Endpoint
+	wq         waiter.Queue
+	netProto   string
 	transProto string
+
+	// Buffer for received but not yet read TCP data.
+	recvBufMu sync.Mutex
+	recvBuf   []byte
 }
 
 func allocSocket(sock *Socket) SocketID {
@@ -125,7 +127,7 @@ func dispatchPacket(pkt []byte) {
 
 	netDispatcher.DeliverNetworkPacket(
 		GlobalWsEndpoint{}, "00:00:00:00:00:00", "00:00:00:00:00:00", proto,
-		tcpip.PacketBuffer{Data: buffer.NewVectorisedView(len(pkt), []buffer.View { pkt })},
+		tcpip.PacketBuffer{Data: buffer.NewVectorisedView(len(pkt), []buffer.View{pkt})},
 	)
 }
 
@@ -136,7 +138,7 @@ func configureNetwork(conf NetConf) {
 	netConf = &conf
 
 	netStk = stack.New(stack.Options{
-		NetworkProtocols: []stack.NetworkProtocol{ipv4.NewProtocol(), ipv6.NewProtocol()},
+		NetworkProtocols:   []stack.NetworkProtocol{ipv4.NewProtocol(), ipv6.NewProtocol()},
 		TransportProtocols: []stack.TransportProtocol{tcp.NewProtocol(), udp.NewProtocol(), icmp.NewProtocol4(), icmp.NewProtocol6()},
 	})
 	if err := netStk.CreateNIC(nicId, globalWsEndpoint); err != nil {
@@ -145,10 +147,10 @@ func configureNetwork(conf NetConf) {
 	if err := netStk.AddAddress(nicId, ipv4.ProtocolNumber, tcpip.Address(net.ParseIP(conf.IPv4.Address).To4())); err != nil {
 		panic(err)
 	}
-	netStk.SetRouteTable([]tcpip.Route {
+	netStk.SetRouteTable([]tcpip.Route{
 		{
 			Destination: header.IPv4EmptySubnet,
-			NIC: nicId,
+			NIC:         nicId,
 		},
 	})
 
@@ -165,7 +167,7 @@ func (sock *Socket) ResolveAddress(addr string) (net.IP, uint16) {
 
 	resolved, err := net.ResolveTCPAddr(fakeTcpProto, addr)
 	if err != nil {
-		panic("ResolveAddress: invalid address");
+		panic("ResolveAddress: invalid address")
 	}
 
 	return resolved.IP, uint16(resolved.Port)
@@ -178,25 +180,31 @@ func JsSocket(network string, transport string) SocketID {
 	var transProto tcpip.TransportProtocolNumber
 
 	switch network {
-	case "ip4": netProto = ipv4.ProtocolNumber
-	case "ip6": netProto = ipv6.ProtocolNumber
-	default: panic("unknown network")
+	case "ip4":
+		netProto = ipv4.ProtocolNumber
+	case "ip6":
+		netProto = ipv6.ProtocolNumber
+	default:
+		panic("unknown network")
 	}
 
 	switch transport {
-	case "tcp": transProto = tcp.ProtocolNumber
-	case "udp": transProto = udp.ProtocolNumber
+	case "tcp":
+		transProto = tcp.ProtocolNumber
+	case "udp":
+		transProto = udp.ProtocolNumber
 	case "icmp":
 		if network == "ip4" {
 			transProto = icmp.ProtocolNumber4
 		} else if network == "ip6" {
 			transProto = icmp.ProtocolNumber6
 		}
-	default: panic("unknown transport")
+	default:
+		panic("unknown transport")
 	}
 
 	var sock = &Socket{
-		netProto: network,
+		netProto:   network,
 		transProto: transport,
 	}
 	var tcpipErr *tcpip.Error
@@ -217,7 +225,7 @@ func JsConnect(sockId SocketID, remoteAddr string) {
 
 	ip, port := sock.ResolveAddress(remoteAddr)
 	fullAddr := tcpip.FullAddress{
-		NIC: nicId,
+		NIC:  nicId,
 		Addr: tcpip.Address(ip),
 		Port: uint16(port),
 	}
@@ -261,7 +269,7 @@ func JsSend(sockId SocketID, jsArray js.Value, remoteAddr string) int32 {
 	if remoteAddr != "" {
 		ip, port := sock.ResolveAddress(remoteAddr)
 		dstAddr = &tcpip.FullAddress{
-			NIC: nicId,
+			NIC:  nicId,
 			Addr: tcpip.Address(ip),
 			Port: port,
 		}
@@ -274,7 +282,7 @@ func JsSend(sockId SocketID, jsArray js.Value, remoteAddr string) int32 {
 	return int32(n)
 }
 
-func JsRecv(sockId SocketID) map[string]interface{} {
+func JsRecv(sockId SocketID, jsArray js.Value) map[string]interface{} {
 	waitForNet()
 	sock, ok := getSocket(sockId)
 	if !ok {
@@ -286,31 +294,63 @@ func JsRecv(sockId SocketID) map[string]interface{} {
 	sock.wq.EventRegister(&waitEntry, waiter.EventIn)
 	defer sock.wq.EventUnregister(&waitEntry)
 
-	for {
-		var fullAddr tcpip.FullAddress
-		pkt, _, err := sock.endpoint.Read(&fullAddr)
-		if err != nil {
-			if err == tcpip.ErrClosedForReceive {
-				return map[string]interface{} {
-					"data": nil,
+	if sock.transProto == "tcp" {
+		sock.recvBufMu.Lock()
+		defer sock.recvBufMu.Unlock()
+
+		arrayLen := jsArray.Get("byteLength").Int()
+		for {
+			if len(sock.recvBuf) >= arrayLen {
+				break
+			}
+			pkt, _, err := sock.endpoint.Read(nil)
+			if err != nil {
+				if err == tcpip.ErrClosedForReceive {
+					break
 				}
+				if err == tcpip.ErrWouldBlock {
+					<-notifyCh
+					continue
+				}
+				panic(err)
 			}
-			if err == tcpip.ErrWouldBlock {
-				<-notifyCh
-				continue
-			}
-			panic(err)
+			sock.recvBuf = append(sock.recvBuf, pkt...)
+			break
 		}
-		jsArray := js.Global().Get("Uint8Array").New(len(pkt))
-		js.CopyBytesToJS(jsArray, []byte(pkt))
-		return map[string]interface{} {
-			"data": jsArray,
-			"remote": map[string]interface{} {
-				"addr": fullAddr.Addr.String(),
-				"port": fullAddr.Port,
-			},
+		copyLen := js.CopyBytesToJS(jsArray, sock.recvBuf)
+		copy(sock.recvBuf, sock.recvBuf[copyLen:])
+		sock.recvBuf = sock.recvBuf[:len(sock.recvBuf)-copyLen]
+		return map[string]interface{}{
+			"len": copyLen,
+		}
+	} else {
+		for {
+			var fullAddr tcpip.FullAddress
+			pkt, _, err := sock.endpoint.Read(&fullAddr)
+			if err != nil {
+				if err == tcpip.ErrClosedForReceive {
+					return map[string]interface{}{
+						"len":    0,
+						"remote": nil,
+					}
+				}
+				if err == tcpip.ErrWouldBlock {
+					<-notifyCh
+					continue
+				}
+				panic(err)
+			}
+			readLen := js.CopyBytesToJS(jsArray, []byte(pkt))
+			return map[string]interface{}{
+				"len": readLen,
+				"remote": map[string]interface{}{
+					"addr": fullAddr.Addr.String(),
+					"port": fullAddr.Port,
+				},
+			}
 		}
 	}
+
 }
 
 func waitForNet() {
