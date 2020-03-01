@@ -255,15 +255,40 @@ func JsClose(sockId SocketID) {
 	sock.endpoint.Close()
 }
 
-func JsSend(sockId SocketID, jsArray js.Value, remoteAddr string) int32 {
+func readIovec(iov js.Value) []byte {
+	iovCount := iov.Length()
+
+	totalLen := 0
+	for i := 0; i < iovCount; i++ {
+		totalLen += iov.Index(i).Get("byteLength").Int()
+	}
+
+	payload := make([]byte, totalLen)
+
+	index := 0
+	for i := 0; i < iovCount; i++ {
+		index += js.CopyBytesToGo(payload[index:], iov.Index(i))
+	}
+	return payload
+}
+
+func writeIovec(iov js.Value, src []byte) int {
+	iovCount := iov.Length()
+	index := 0
+	for i := 0; i < iovCount; i++ {
+		index += js.CopyBytesToJS(iov.Index(i), src[index:])
+	}
+	return index
+}
+
+func JsSend(sockId SocketID, jsIovec js.Value, remoteAddr string) int32 {
 	waitForNet()
 	sock, ok := getSocket(sockId)
 	if !ok {
 		panic("invalid socket id")
 	}
 
-	payload := make([]byte, jsArray.Get("byteLength").Int())
-	js.CopyBytesToGo(payload, jsArray)
+	payload := readIovec(jsIovec)
 
 	var dstAddr *tcpip.FullAddress
 	if remoteAddr != "" {
@@ -275,14 +300,28 @@ func JsSend(sockId SocketID, jsArray js.Value, remoteAddr string) int32 {
 		}
 	}
 
-	n, _, err := sock.endpoint.Write(tcpip.SlicePayload(payload), tcpip.WriteOptions{To: dstAddr})
-	if err != nil {
-		panic(err)
+	waitEntry, notifyCh := waiter.NewChannelEntry(nil)
+
+	sock.wq.EventRegister(&waitEntry, waiter.EventOut)
+	defer sock.wq.EventUnregister(&waitEntry)
+
+	for {
+		n, _, err := sock.endpoint.Write(tcpip.SlicePayload(payload), tcpip.WriteOptions{To: dstAddr})
+		if err != nil {
+			if err == tcpip.ErrClosedForReceive {
+				return 0
+			}
+			if err == tcpip.ErrWouldBlock {
+				<-notifyCh
+				continue
+			}
+			panic(err)
+		}
+		return int32(n)
 	}
-	return int32(n)
 }
 
-func JsRecv(sockId SocketID, jsArray js.Value) map[string]interface{} {
+func JsRecv(sockId SocketID, jsIovec js.Value) map[string]interface{} {
 	waitForNet()
 	sock, ok := getSocket(sockId)
 	if !ok {
@@ -298,7 +337,12 @@ func JsRecv(sockId SocketID, jsArray js.Value) map[string]interface{} {
 		sock.recvBufMu.Lock()
 		defer sock.recvBufMu.Unlock()
 
-		arrayLen := jsArray.Get("byteLength").Int()
+		arrayLen := 0
+		iovCount := jsIovec.Length()
+		for i := 0; i < iovCount; i++ {
+			arrayLen += jsIovec.Index(i).Get("byteLength").Int()
+		}
+
 		for {
 			if len(sock.recvBuf) >= arrayLen {
 				break
@@ -317,7 +361,7 @@ func JsRecv(sockId SocketID, jsArray js.Value) map[string]interface{} {
 			sock.recvBuf = append(sock.recvBuf, pkt...)
 			break
 		}
-		copyLen := js.CopyBytesToJS(jsArray, sock.recvBuf)
+		copyLen := writeIovec(jsIovec, sock.recvBuf)
 		copy(sock.recvBuf, sock.recvBuf[copyLen:])
 		sock.recvBuf = sock.recvBuf[:len(sock.recvBuf)-copyLen]
 		return map[string]interface{}{
@@ -340,9 +384,9 @@ func JsRecv(sockId SocketID, jsArray js.Value) map[string]interface{} {
 				}
 				panic(err)
 			}
-			readLen := js.CopyBytesToJS(jsArray, []byte(pkt))
+			writeLen := writeIovec(jsIovec, []byte(pkt))
 			return map[string]interface{}{
-				"len": readLen,
+				"len": writeLen,
 				"remote": map[string]interface{}{
 					"addr": fullAddr.Addr.String(),
 					"port": fullAddr.Port,
