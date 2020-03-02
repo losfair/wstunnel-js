@@ -27,18 +27,18 @@ func main() {
 	root := js.ValueOf(map[string]interface{}{
 		"socket": js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 			return asynchronously(func() interface{} {
-				return int32(JsSocket(args[0].String(), args[1].String()))
+				return float64(JsSocket(args[0].String(), args[1].String()))
 			})
 		}),
 		"connect": js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 			return asynchronously(func() interface{} {
-				JsConnect(SocketID(args[0].Int()), args[1].String())
+				JsConnect(SocketID(args[0].Float()), args[1].String())
 				return nil
 			})
 		}),
 		"close": js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 			return asynchronously(func() interface{} {
-				JsClose(SocketID(args[0].Int()))
+				JsClose(SocketID(args[0].Float()))
 				return nil
 			})
 		}),
@@ -48,12 +48,12 @@ func main() {
 				if len(args) >= 3 {
 					remoteAddr = args[2].String()
 				}
-				return JsSend(SocketID(args[0].Int()), args[1], remoteAddr)
+				return JsSend(SocketID(args[0].Float()), args[1], remoteAddr)
 			})
 		}),
 		"recv": js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 			return asynchronously(func() interface{} {
-				return JsRecv(SocketID(args[0].Int()), args[1])
+				return JsRecv(SocketID(args[0].Float()), args[1])
 			})
 		}),
 	})

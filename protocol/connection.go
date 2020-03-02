@@ -19,7 +19,7 @@ import (
 )
 
 var sockets sync.Map
-var nextSocketID int32
+var nextSocketID int64
 var netConf *NetConf
 var netStk *stack.Stack
 var netDispatcher stack.NetworkDispatcher
@@ -28,7 +28,7 @@ var nicId tcpip.NICID = 1
 
 var netReady = make(chan struct{})
 
-type SocketID int32
+type SocketID int64
 
 type GlobalWsEndpoint struct {
 }
@@ -91,7 +91,7 @@ type Socket struct {
 }
 
 func allocSocket(sock *Socket) SocketID {
-	id := SocketID(atomic.AddInt32(&nextSocketID, 1))
+	id := SocketID(atomic.AddInt64(&nextSocketID, 1))
 	sockets.Store(id, sock)
 	return id
 }
